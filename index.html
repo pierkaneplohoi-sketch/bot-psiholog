@@ -2175,6 +2175,7 @@ const CONFIG = {
 </script>
 <script>const Store = (function () {
   const KEY = CONFIG.storageKey;
+  const LAST_EMAIL_KEY = KEY + '.lastEmail';
   const ID_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   let db = null;
   let storageAvailable = true;
@@ -2415,7 +2416,8 @@ const CONFIG = {
     db.users.push(user);
     db.session = user.id;
     save();
-    return user;
+    rememberEmail(email);
+    return { user: user, persisted: verifyUserSaved(user.id) };
   }
 
   async function login(email, password) {
@@ -2427,7 +2429,76 @@ const CONFIG = {
     user.stats.sessions = (user.stats.sessions || 1) + 1;
     user.lastSeen = Date.now();
     save();
+    rememberEmail(email);
     return user;
+  }
+
+  function rememberEmail(email) {
+    try {
+      window.localStorage.setItem(LAST_EMAIL_KEY, normalizeEmail(email));
+    } catch (err) {
+      /* запоминание почты не критично */
+    }
+  }
+
+  function lastEmail() {
+    try {
+      return window.localStorage.getItem(LAST_EMAIL_KEY) || '';
+    } catch (err) {
+      return '';
+    }
+  }
+
+  function verifyUserSaved(id) {
+    try {
+      const raw = window.localStorage.getItem(KEY);
+      if (!raw) return false;
+      const parsed = JSON.parse(raw);
+      return (parsed.users || []).some(function (u) { return u.id === id; });
+    } catch (err) {
+      return false;
+    }
+  }
+
+  function storageInfo() {
+    try {
+      const probe = KEY + '.probe';
+      window.localStorage.setItem(probe, '1');
+      window.localStorage.removeItem(probe);
+      return { ok: true, users: db ? db.users.length : 0 };
+    } catch (err) {
+      return { ok: false, users: db ? db.users.length : 0 };
+    }
+  }
+
+  function backupJson() {
+    return JSON.stringify({
+      kind: 'psybot-backup',
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      users: db ? db.users : []
+    }, null, 2);
+  }
+
+  function importBackup(text) {
+    let data;
+    try {
+      data = JSON.parse(String(text || ''));
+    } catch (err) {
+      throw new Error('Файл повреждён или это не JSON.');
+    }
+    if (!data || !Array.isArray(data.users)) {
+      throw new Error('Это не резервная копия Бот-Психолога.');
+    }
+    let added = 0;
+    data.users.forEach(function (raw) {
+      if (!raw || !raw.id || !raw.email) return;
+      if (findUser(raw.id) || findByEmail(raw.email)) return;
+      db.users.push(withDefaults(raw));
+      added++;
+    });
+    if (added) save();
+    return added;
   }
 
   function logout() {
@@ -2764,6 +2835,10 @@ const CONFIG = {
     listUsers: listUsers,
     getUser: getUser,
     exportData: exportData,
+    backupJson: backupJson,
+    importBackup: importBackup,
+    lastEmail: lastEmail,
+    storageInfo: storageInfo,
     deleteAccount: deleteAccount,
     updateSettings: updateSettings,
     getBotConfig: getBotConfig,
@@ -4194,6 +4269,7 @@ const CONFIG = {
     if (!u) return;
     const isPrem = premium();
     const theme = (u.settings && u.settings.theme) || 'dark';
+    const storage = Store.storageInfo();
     let html = '';
 
     html += '<div class="section">' +
@@ -4278,10 +4354,16 @@ const CONFIG = {
       '<div class="row row--between"><span class="muted">ID</span><code>' + esc(u.id) + '</code></div>' +
       '<div class="row row--between"><span class="muted">Кошелёк</span><span><strong>' + Store.walletBalance() + ' ₽</strong></span></div>' +
       '<div class="row row--between"><span class="muted">Премиум</span><span>' + (isPrem ? (Store.premiumUntil() ? 'до ' + fmtDate(Store.premiumUntil()) : 'активен') : 'не активен') + '</span></div>' +
+      '<div class="row row--between"><span class="muted">Хранилище</span><span>' + (storage.ok ? 'работает · аккаунтов: ' + storage.users : 'недоступно') + '</span></div>' +
       '<div class="row row--between"><span class="muted">Регистрация</span><span>' + fmtDate(u.createdAt) + '</span></div>' +
       '<div class="row row--between"><span class="muted">Сообщений</span><span>' + (u.stats.messages || 0) + '</span></div>' +
       '</div>' +
       '<div class="row" style="margin-top:16px"><button class="btn btn--ghost btn--sm" type="button" data-action="open-topup">Пополнить кошелёк</button><button class="btn btn--ghost btn--sm" type="button" data-action="logout">Выйти из аккаунта</button></div>' +
+      '<div class="row" style="margin-top:10px">' +
+      '<button class="btn btn--ghost btn--sm" type="button" data-action="export-backup">Скачать копию аккаунтов</button>' +
+      '<button class="btn btn--ghost btn--sm" type="button" data-action="import-backup">Восстановить из копии</button>' +
+      '</div>' +
+      '<p class="small muted" style="margin-top:8px">Копия переносит аккаунты в другой браузер или возвращает их после очистки данных. В файле есть данные аккаунтов — храните его у себя.</p>' +
       '</div>';
 
     $('#settingsBody').innerHTML = html;
@@ -4495,6 +4577,11 @@ const CONFIG = {
   function fillAuthForms() {
     $('#loginForm').reset();
     $('#registerForm').reset();
+    const savedEmail = Store.lastEmail();
+    if (savedEmail) {
+      $('#loginForm').email.value = savedEmail;
+      $('#registerForm').email.value = savedEmail;
+    }
     $('#loginError').hidden = true;
     $('#registerError').hidden = true;
   }
@@ -5038,6 +5125,31 @@ const CONFIG = {
       downloadJson('psybot-' + user().id + '.json', content);
       toast('Файл с данными скачан');
     },
+    'export-backup': function () {
+      downloadJson('psybot-backup.json', Store.backupJson());
+      toast('Копия аккаунтов скачана. Храните файл в надёжном месте.');
+    },
+    'import-backup': function () {
+      const picker = document.createElement('input');
+      picker.type = 'file';
+      picker.accept = '.json,application/json';
+      picker.onchange = function () {
+        const file = picker.files && picker.files[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = function () {
+          try {
+            const added = Store.importBackup(String(reader.result));
+            renderSettings();
+            toast(added ? 'Восстановлено аккаунтов: ' + added + '. Войдите с прежним паролем.' : 'Новых аккаунтов в копии не найдено');
+          } catch (err) {
+            toast(err.message || 'Не удалось прочитать файл', true);
+          }
+        };
+        reader.readAsText(file, 'utf-8');
+      };
+      picker.click();
+    },
     'delete-account': function () {
       confirmModal({
         title: 'Удалить аккаунт?',
@@ -5176,7 +5288,11 @@ const CONFIG = {
       showApp();
       toast('С возвращением');
     }).catch(function (err) {
-      error.textContent = err.message;
+      let message = err.message;
+      if (/не найден/.test(message) && Store.listUsers().length === 0) {
+        message += ' В этом браузере пока нет ни одного аккаунта. Если вы регистрировались на другом устройстве, в другом браузере или по другому адресу (файл с диска, localhost, github.io) — данные остались там.';
+      }
+      error.textContent = message;
       error.hidden = false;
     }).finally(function () {
       button.disabled = false;
@@ -5196,10 +5312,23 @@ const CONFIG = {
       password: form.password.value,
       password2: form.password2.value,
       consent: form.consent.checked
-    }).then(function (created) {
+    }).then(function (result) {
+      const created = result.user;
       $('#newUserId').textContent = created.id;
       $('#authCard').hidden = true;
       $('#welcomeCard').hidden = false;
+      if (!result.persisted) {
+        openModal(
+          '<div class="modal__head"><h3 class="modal__title">Аккаунт не сохранится</h3>' +
+          '<button class="icon-btn" type="button" data-action="close-modal" aria-label="Закрыть">✕</button></div>' +
+          '<div class="modal__body">' +
+          '<p>Браузер не дал сохранить аккаунт в память сайта. Скорее всего, открыт режим инкогнито или запрещены данные сайтов.</p>' +
+          '<p>Пока вкладка открыта, всё работает. После перезагрузки аккаунт исчезнет и войти с этой почтой не получится.</p>' +
+          '<ul class="premiumList"><li>Откройте сайт в обычном окне браузера</li><li>Разрешите хранение данных для этого адреса</li><li>Отключите блокировщики, которые чистят хранилище</li></ul>' +
+          '</div>' +
+          '<div class="modal__actions"><button class="btn btn--primary" type="button" data-action="close-modal">Понятно</button></div>'
+        );
+      }
     }).catch(function (err) {
       error.textContent = err.message;
       error.hidden = false;
