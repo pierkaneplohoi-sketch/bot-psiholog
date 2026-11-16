@@ -1998,6 +1998,11 @@ const CONFIG = {
   framePrice: 50,
   minPassword: 6,
 
+  /* Энциклопедическая справка из сети (Википедия) для вопросов вида
+     «что такое …». Запрос уходит только по ключевому слову, без текста
+     сообщения. false — полностью офлайн. */
+  webLookup: true,
+
   /* Впишите сюда свой ID (вида PSY-XXXX-XXXX) после регистрации —
      в приложении появится вкладка «Настройка бота». */
   adminIds: ['PSY-EMD7-B6JC', 'PSY-YMRA-CJDB', 'PSY-YEW4-LFFU'],
@@ -2173,7 +2178,7 @@ const CONFIG = {
   ]
 };
 </script>
-<script>const Store = (function () {
+  <script>const Store = (function () {
   const KEY = CONFIG.storageKey;
   const LAST_EMAIL_KEY = KEY + '.lastEmail';
   const ID_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -2850,7 +2855,198 @@ const CONFIG = {
   };
 })();
 </script>
-<script>const AI = (function () {
+  <script>/* База знаний бота: короткие проверенные факты, из которых строится ответ.
+   Поле keys — регулярные выражения, по которым факт узнаётся в вопросе.
+   src — источник одной строкой, он показывается в ответе. */
+const KB = {
+  facts: [
+    {
+      id: 'cbt-panic',
+      topic: 'panic',
+      kinds: ['whether', 'works', 'howlong'],
+      keys: [/кпт/, /когнитивн/, /терапи.*паник/, /паник.*терапи/],
+      text: 'КПТ при паническом расстройстве работает, но эффект умеренный, а не «вылечивает навсегда»: в мета-анализе 74 исследований он выше у терапии вживую с терапевтом, слабее у самопомощи с поддержкой и почти нулевой у самопомощи без специалиста. Обычно это 10–16 встреч, и эффект заметнее всего в первые месяцы — дальше он постепенно слабеет.',
+      src: 'Papola и др., Psychological Medicine, 2023; Cochrane, 2016'
+    },
+    {
+      id: 'cbt-vs-pills',
+      topic: 'panic',
+      kinds: ['whether', 'works'],
+      keys: [/таблет/, /лекарств/, /антидепресс/, /медикамент/],
+      text: 'Насчёт «КПТ лучше таблеток» — не доказано: в обзоре Cochrane по краткосрочному результату при панике разницы между психотерапией и медикаментами не нашли, а качество исследований было низким. Выбор между ними — вопрос не «что сильнее», а что человек переносит, чего хочет и что доступно; это решает врач.',
+      src: 'Cochrane, 2016'
+    },
+    {
+      id: 'panic-nature',
+      topic: 'panic',
+      kinds: ['what', 'danger', 'why'],
+      keys: [/что такое паник/, /паническ/],
+      text: 'Паническая атака — это ложная тревога тела: выброс адреналина без реальной опасности. Пик наступает за 10 минут, а через 20–30 минут тело возвращается в норму само — сердечный приступ так не проходит. Опасна не атака, а страх перед ней: именно он держит приступы регулярными.',
+      src: 'клинические описания панического расстройства, DSM-5'
+    },
+    {
+      id: 'panic-caffeine',
+      topic: 'panic',
+      kinds: ['why', 'whether'],
+      keys: [/кофе/, /кофеин/, /энергетик/, /курени/],
+      text: 'Кофеин и энергетики поднимают пульс и имитируют телесные симптомы тревоги — тело читает их как «опасность». Если приступы частые, первое, что стоит попробовать, — убрать кофеин после обеда на две недели и посмотреть, изменится ли частота.',
+      src: 'обзоры по кофеину и тревоге'
+    },
+    {
+      id: 'anxiety-alarm',
+      topic: 'anxiety',
+      kinds: ['what', 'why'],
+      keys: [/что такое тревог/, /зачем нужна тревог/, /откуда тревог/],
+      text: 'Тревога — не поломка, а система оповещения: она говорит «возможно», а человек слышит «точно случится». Проблема начинается, когда оповещение не выключается: организм живёт в режиме подготовки к удару, который не приходит. Поэтому работают не уговоры «успокойся», а конкретика и снижение избегания.',
+      src: 'когнитивная модель тревоги (Бек, Кларк)'
+    },
+    {
+      id: 'anxiety-avoidance',
+      topic: 'anxiety',
+      kinds: ['how', 'advice'],
+      keys: [/избега/, /не ходить/, /не звонить/, /откладыва/],
+      text: 'Избегание облегчает на минуту и закрепляет страх на месяцы: мозг получает доказательство «опасно» и требует избегать и дальше. Работает обратное — маленькие шаги в сторону страшного, от лёгкого к трудному, чтобы опыт опроверг прогноз.',
+      src: 'NICE; обзоры по экспозиции'
+    },
+    {
+      id: 'sleep-cbti',
+      topic: 'sleep',
+      kinds: ['whether', 'how'],
+      keys: [/что помогает.*сон/, /как.*(уснуть|спать)/, /бессонн.*лечен/, /кпт.*сон/, /таблет.*сон/],
+      text: 'При хронической бессоннице терапия первого выбора — КПТ-И (поведенческая терапия сна), а не снотворные: она даёт более устойчивый результат и без привыкания. Внутри — фиксированное время подъёма, ограничение времени в постели и правило «нет сна 20 минут — встать».',
+      src: 'AASM, 2021; NICE'
+    },
+    {
+      id: 'sleep-early-waking',
+      topic: 'sleep',
+      kinds: ['why', 'what'],
+      keys: [/в ?4 утра/, /в четыре утра/, /в 5 утра/, /в пять утра/, /просыпаюсь ран/, /рано просыпа/, /просыпаюсь ночью/],
+      text: 'Ранние пробуждения в 4–5 утра обычно связаны не со «сбитым режимом», а с тревогой или сниженным настроением: к этому времени глубокий сон уже пройден, и любая мысль цепляется сильнее. Если так почти каждую ночь и месяцами — стоит исключить депрессию и апноэ: это к врачу, а не к силе воли.',
+      src: 'клинические описания нарушений сна'
+    },
+    {
+      id: 'sleep-fixwake',
+      topic: 'sleep',
+      kinds: ['how', 'advice'],
+      keys: [/сбил.*режим/, /не могу уснуть/, /поздно ложусь/, /режим/],
+      text: 'Режим сдвигает не время отбоя, а время подъёма: вставайте в один и тот же час семь дней в неделю, даже после плохой ночи, и добавьте яркий свет в первый час. «Не спать сутки, чтобы сбить режим» обычно делает хуже — накапливается перевозбуждение, и следующая ночь приходит позже.',
+      src: 'принципы КПТ-И'
+    },
+    {
+      id: 'sleep-alcohol',
+      topic: 'sleep',
+      kinds: ['why', 'whether'],
+      keys: [/алкогол/, /выпил/, /вино перед сном/],
+      text: 'Алкоголь усыпляет, но ломает вторую половину ночи: меньше глубокого сна и сновидений, раньше поверхностные пробуждения. Отсюда знакомое «заснул быстро, а в четыре утра проснулся и лежу».',
+      src: 'обзоры по алкоголю и архитектуре сна'
+    },
+    {
+      id: 'burnout-ba',
+      topic: 'burnout',
+      kinds: ['how', 'advice', 'what'],
+      keys: [/ничего не хочется/, /нет сил/, /апати/, /выгор/, /депресс/],
+      text: 'При упадке сил ждут желания, чтобы начать, — а оно приходит после действия. Это принцип поведенческой активации: сначала маленькое конкретное дело на 10–20 минут по расписанию, потом интерес. Такой подход при депрессии по эффективности не уступает полной КПТ.',
+      src: 'Ekers и др., Cochrane, 2014; Richards и др., Lancet, 2016'
+    },
+    {
+      id: 'depression-serotonin',
+      topic: 'burnout',
+      kinds: ['what', 'why'],
+      keys: [/серотонин/, /химическ.*дисбаланс/, /депрессия.*мозг/],
+      text: 'Формула «депрессия — это нехватка серотонина» сильно упрощена: большой обзор 2022 года не нашёл подтверждения, что у людей с депрессией уровень серотонина стабильно снижен. Это не отменяет ни тяжести состояния, ни помощи, но объясняет, почему «просто поднять серотонин» — не работающая идея.',
+      src: 'Moncrieff и др., Molecular Psychiatry, 2022'
+    },
+    {
+      id: 'exercise-mood',
+      topic: 'burnout',
+      kinds: ['does', 'whether', 'how'],
+      keys: [/спорт/, /физкультур/, /бег/, /движени/],
+      text: 'Физическая активность при сниженном настроении даёт умеренный, но реальный эффект — сопоставимый с частью эффекта терапии, особенно при регулярности 2–3 раза в неделю. Смысл не в форме, а в том, что движение меняет состояние тела, из которого растёт настроение.',
+      src: 'обзоры Cochrane по физической активности'
+    },
+    {
+      id: 'habits-21',
+      topic: 'generic',
+      kinds: ['whether', 'howlong', 'what'],
+      keys: [/21 день/, /привычк/, /за сколько/],
+      text: '«Привычка формируется за 21 день» — миф из популярной книги. В исследовании 2010 года медиана была 66 дней, а разброс — от 18 до 254: зависит от сложности действия и от того, насколько регулярно оно повторяется в одинаковом контексте.',
+      src: 'Lally и др., European Journal of Social Psychology, 2010'
+    },
+    {
+      id: 'rumination',
+      topic: 'anxiety',
+      kinds: ['what', 'why', 'how'],
+      keys: [/прокручива/, /навязчив/, /мысли.*круг/, / rumination/],
+      text: 'Прокручивание мыслей ощущается как решение проблемы, но им не является: это способ снизить тревогу без действия, и он её усиливает. Работает не «перестать думать», а отвести беспокойству отдельные 15 минут в расписании — тогда в остальное время мозгу проще отпускать.',
+      src: 'Nolen-Hoeksema; техника отложенного беспокойства'
+    },
+    {
+      id: 'procrastination',
+      topic: 'work',
+      kinds: ['why', 'how'],
+      keys: [/прокрастин/, /не могу начать/, /откладыва/],
+      text: 'Прокрастинация — не лень, а избегание неприятного чувства на старте задачи, и исследования связывают её с трудностями регуляции эмоций. Поэтому «взять себя в руки» не работает, а «пять минут, потом можно остановиться» — работает: у мозга появляется выход.',
+      src: 'Sirois, Pychyl, 2013'
+    },
+    {
+      id: 'exposure',
+      topic: 'anxiety',
+      kinds: ['whether', 'how'],
+      keys: [/экспозиц/, /боюсь.*(метро|самолет|лифт|выступ)/],
+      text: 'Самый надёжный механизм при страхах — экспозиция: оставаться в пугающей ситуации, пока тревога не снизится сама, шагами от лёгкого к трудному. Именно поэтому «подумать о страхе» и «успокоиться таблеткой перед выходом» дают слабее результат, чем пройти шаг и увидеть, что катастрофа не случилась.',
+      src: 'NICE; мета-анализы по экспозиционной терапии'
+    },
+    {
+      id: 'mindfulness',
+      topic: 'anxiety',
+      kinds: ['whether', 'works'],
+      keys: [/медитац/, /осознанн/, /mindfulness/],
+      text: 'Медитация и практики осознанности при тревоге дают небольшой и умеренный эффект — примерно как релаксация, и слабее, чем КПТ. Это не «лечение вместо», а скорее навык замечать мысли без вовлечения; работает при регулярности, а не разово.',
+      src: 'Goyal и др., JAMA Internal Medicine, 2014'
+    },
+    {
+      id: 'loneliness',
+      topic: 'lonely',
+      kinds: ['what', 'why'],
+      keys: [/одинок/, /нет друзей/, /никому не нужен/],
+      text: 'Одиночество влияет на здоровье сильнее, чем принято думать: мета-анализ 2015 года связывает его с ростом смертности примерно на 26–29%. Дело не в количестве контактов, а в ощущении, что тебя видят; часто первый шаг — не «найти друзей», а возобновить один старый контакт.',
+      src: 'Holt-Lunstad и др., Perspectives on Psychological Science, 2015'
+    },
+    {
+      id: 'grief',
+      topic: 'grief',
+      kinds: ['what', 'how'],
+      keys: [/горе/, /потеря/, /умер/, /скорб/],
+      text: 'Горе не идёт по стадиям — модель «пять этапов» не подтвердилась: люди проходят его неровно, с возвратами, и это нормально. Помогает не «пережить быстрее», а сохранять связь с ушедшим и вернуть ритм дня, когда силы появляются.',
+      src: 'Stroebe и др., 2017'
+    },
+    {
+      id: 'anger-body',
+      topic: 'anger',
+      kinds: ['what', 'how'],
+      keys: [/злюсь/, /гнев/, /бесит/, /ярость/],
+      text: 'Злость физиологически коротка — волна гормонов спадает за 10–20 минут, если её не подкармливать пересказом ситуации. Поэтому пауза и физическая разрядка работают лучше, чем «высказать всё»: высказывание часто продлевает возбуждение.',
+      src: 'исследования регуляции гнева'
+    }
+  ],
+
+  /* Что такое X: если вопроса нет в фактах, но он про термин, пробуем
+     энциклопедическую справку (только при включённом поиске). */
+  definitions: {
+    'паническая атака': 'panic',
+    'тревога': 'anxiety',
+    'тревожность': 'anxiety',
+    'депрессия': 'burnout',
+    'выгорание': 'burnout',
+    'бессонница': 'sleep',
+    'прокрастинация': 'work',
+    'стресс': 'stress',
+    'кпт': 'generic',
+    'когнитивно-поведенческая терапия': 'generic'
+  }
+};
+</script>
+  <script>﻿const AI = (function () {
   const recent = {};
 
   const CRISIS = [
@@ -2913,8 +3109,8 @@ const CONFIG = {
   const TOPICS = [
     { id: 'anxiety', words: ['тревог', 'тревожн', 'беспоко', 'волну', 'переживаю', 'страшно', 'боюсь', 'нервн', 'напряж', 'паник'] },
     { id: 'panic', words: ['паник', 'не хватает воздуха', 'задыха', 'сердце колот', 'трясёт', 'трясет', 'накрывает', 'приступ'] },
-    { id: 'burnout', words: ['выгор', 'нет сил', 'истощ', 'вымотан', 'апати', 'безразли', 'не могу больше', 'устал от всего'] },
-    { id: 'work', words: ['работ', 'начальник', 'коллег', 'дедлайн', 'увол', 'зарплат', 'офис', 'проект', 'переработ', 'собеседован'] },
+    { id: 'burnout', words: ['выгор', 'нет сил', 'истощ', 'вымотан', 'апати', 'безразли', 'не могу больше', 'устал от всего', 'ничего не хочется', 'не хочется ничего', 'туман', 'как в тумане'] },
+    { id: 'work', words: ['работ', 'начальник', 'коллег', 'дедлайн', 'увол', 'зарплат', 'офис', 'проект', 'переработ', 'собеседован', 'прокрастин', 'не могу начать', 'откладыва'] },
     { id: 'relations', words: ['парн', 'девушк', 'отношен', 'расстал', 'бросил', 'жена', 'муж', 'свидан', 'измен', 'влюб', 'любов', 'ссор'] },
     { id: 'family', words: ['мам', 'пап', 'родител', 'сын', 'доч', 'ребен', 'ребён', 'семь', 'сестр', 'брат', 'бабушк', 'дедушк'] },
     { id: 'self', words: ['самооцен', 'уверен', 'неудач', 'не получается', 'я плох', 'стыд', 'вина', 'виноват', 'критик', 'сравнива', 'недостаточно'] },
@@ -3335,10 +3531,10 @@ const CONFIG = {
 
   function detectMood(text) {
     const lower = text.toLowerCase();
-    if (/плак|слёз|слез|рыда|тоск|груст|пусто|больно/.test(lower)) return 'sad';
-    if (/злюсь|бесит|ненавиж|раздраж|гнев/.test(lower)) return 'angry';
-    if (/тревог|страшно|боюсь|паник|волну/.test(lower)) return 'anxious';
-    if (/устал|нет сил|выгор|истощ|спать хочу/.test(lower)) return 'tired';
+    if (/плак|слёз|слез|рыда|тоск|груст|больно/.test(lower)) return 'sad';
+    if (/злюсь|бесит|ненавиж|раздраж|гнев|ярост/.test(lower)) return 'angry';
+    if (/тревог|тревож|страшно|боюсь|паник|волну|накрывает/.test(lower)) return 'anxious';
+    if (/устал|нет сил|выгор|истощ|спать хочу|апати|туман|пусто|безразли|не хочется/.test(lower)) return 'tired';
     if (/надежд|получилось|рад|спокойн|легче/.test(lower)) return 'hopeful';
     return 'neutral';
   }
@@ -3387,6 +3583,260 @@ const CONFIG = {
     return /[a-z]/i.test(text) && !/[а-яё]/i.test(text);
   }
 
+
+  /* ── Разбор сообщения ───────────────────────────────────────────────
+     Раньше ответ собирался случайным выбором строк из банка: он подходил
+     кому угодно и поэтому никому конкретно. Теперь сначала разбираем, что
+     человек написал и о чём именно спросил, и только потом собираем ответ. */
+
+  const memory = { topic: '', turn: 0, fact: '' };
+
+  const REFLECT = {
+    anxious: [
+      'В словах «{q}» слышно, как тревога держит вас в напряжении.',
+      '«{q}» — и понятно, сколько сил уходит на то, чтобы это выдерживать.',
+      'За фразой «{q}» стоит ожидание подвоха, которое не выключается.'
+    ],
+    sad: [
+      '«{q}» — в этом столько усталости, что она уже не про сегодняшний день.',
+      'За словами «{q}» — тяжесть, которую трудно кому-то показать.',
+      '«{q}» звучит тихо, но за этим, похоже, много боли.'
+    ],
+    angry: [
+      '«{q}» — злость здесь не каприз, а сигнал, что границу перешли.',
+      'За словами «{q}» стоит раздражение, которое копилось давно.',
+      '«{q}» — это уже не про мелочь, а про то, что терпение кончилось.'
+    ],
+    tired: [
+      '«{q}» — так описывают состояние, когда резерв кончился, а обязательства остались.',
+      'За фразой «{q}» слышно истощение, а не лень.',
+      '«{q}» — и понятно, что сил нет даже на объяснение, почему их нет.'
+    ],
+    hopeful: [
+      '«{q}» — в этом уже есть движение, даже если оно пока маленькое.',
+      'Слышу в словах «{q}» осторожную надежду.',
+      '«{q}» звучит спокойнее, чем обычно, — и это важно.'
+    ],
+    neutral: [
+      'Вы говорите: «{q}». Давайте разберёмся, что здесь главное.',
+      '«{q}» — с этого и начнём.',
+      'В словах «{q}» есть деталь, за которую можно зацепиться.'
+    ]
+  };
+
+  const CLARIFY = {
+    what: 'Вам нужно объяснить, что это такое, — или разобрать, что происходит именно с вами?',
+    why: 'Чтобы ответить точнее: когда это началось и с чем совпало?',
+    how: 'Скажите, что вы уже пробовали, — тогда не буду предлагать то же самое.',
+    advice: 'Что в этой ситуации сейчас самое тяжёлое?',
+    whether: 'А что вас привело к этому вопросу — свой опыт или то, что читали?',
+    howlong: 'Вам важно понять срок — или с чего начать?',
+    danger: 'Это появилось впервые или уже было раньше?'
+  };
+
+  function hash(str) {
+    let h = 0;
+    for (let i = 0; i < str.length; i += 1) h = (h * 31 + str.charCodeAt(i)) | 0;
+    return Math.abs(h);
+  }
+
+  function choose(list, key, seed) {
+    if (!list || !list.length) return '';
+    const used = recent[key] || [];
+    const valueOf = function (item) { return typeof item === 'string' ? item : item.name; };
+    let pool = list.filter(function (item) { return used.indexOf(valueOf(item)) === -1; });
+    if (!pool.length) {
+      pool = list.slice();
+      recent[key] = [];
+    }
+    const item = pool[hash(key + '|' + (seed || '')) % pool.length];
+    recent[key] = (recent[key] || []).concat(valueOf(item)).slice(-6);
+    return item;
+  }
+
+  function quoteOf(raw) {
+    let t = String(raw || '').replace(/\s+/g, ' ').trim();
+    t = t.replace(/^(ну|вот|просто|короче|слушай|слушайте|извини|извините)[,\s]+/i, '');
+    let q = t.split(/(?<=[.!?])\s+/)[0] || t;
+    if (q.length > 90) {
+      const cut = q.slice(0, 90);
+      q = cut.slice(0, Math.max(cut.lastIndexOf(' '), 40)) + '…';
+    }
+    return q.replace(/[.,;:!?]+$/, '');
+  }
+
+  function parseQuestion(raw, lower) {
+    const result = { isQuestion: false, kind: '', term: '' };
+    const looksLikeQuestion = /\?/.test(raw) ||
+      /^(что|кто|как|почему|зачем|когда|где|куда|сколько|можно|стоит|помогает|работает|правда|есть ли|опасно|расскажи|объясни|подскажи)/.test(lower);
+    if (!looksLikeQuestion) return result;
+
+    result.isQuestion = true;
+
+    if (/что такое|что значит|кто так|определени|расскажи(те)? (про|о|об)|объясни(те)?/.test(lower)) {
+      result.kind = 'what';
+      const m = lower.match(/(?:что такое|что значит|кто так(?:ой|ая|ие)|расскажи(?:те)? (?:про|о|об)|объясни(?:те)?)\s+([^?!.]{3,60})/);
+      if (m) result.term = m[1].trim();
+    } else if (/что делать|что мне делать|как быть|как справиться|как перестать|как успоко|как начать|как выйти|помоги|подскажи|посоветуй/.test(lower)) {
+      result.kind = 'advice';
+    } else if (/почему|отчего|из-за чего|с чего начал/.test(lower)) {
+      result.kind = 'why';
+    } else if (/как /.test(lower)) {
+      result.kind = 'how';
+    } else if (/сколько (времени|сессий|длится|нужно|раз|месяцев|лет)/.test(lower)) {
+      result.kind = 'howlong';
+    } else if (/опасно|смертельн|вредно|может ли.*(умереть|навредить)/.test(lower)) {
+      result.kind = 'danger';
+    } else if (/помогает ли|работает ли|правда ли|стоит ли|можно ли|есть ли (смысл|польза|эффект)|эффективн|доказан/.test(lower)) {
+      result.kind = 'whether';
+    } else {
+      result.kind = 'what';
+    }
+    return result;
+  }
+
+  function findFact(topic, lower, kind) {
+    if (typeof KB === 'undefined' || !KB.facts) return null;
+    let best = null;
+    let bestScore = 0;
+    KB.facts.forEach(function (fact) {
+      let score = 0;
+      if (fact.topic === topic) score += 2;
+      if (fact.kinds.indexOf(kind) !== -1) score += 2;
+      fact.keys.forEach(function (re) {
+        if (re.test(lower)) score += 4;
+      });
+      if (score > bestScore) {
+        bestScore = score;
+        best = fact;
+      }
+    });
+    return bestScore >= 4 ? best : null;
+  }
+
+  function wikipediaExtract(term) {
+    if (CONFIG.webLookup === false || typeof fetch !== 'function') return Promise.resolve(null);
+    const query = term.replace(/[^\wа-яё\s-]/gi, ' ').trim();
+    if (query.length < 3) return Promise.resolve(null);
+
+    const request = fetch('https://ru.wikipedia.org/w/api.php?action=query&list=search&srsearch=' +
+        encodeURIComponent(query) + '&format=json&origin=*&srlimit=1')
+      .then(function (res) { return res.json(); })
+      .then(function (data) {
+        const hit = data && data.query && data.query.search && data.query.search[0];
+        if (!hit) return null;
+        return fetch('https://ru.wikipedia.org/api/rest_v1/page/summary/' +
+            encodeURIComponent(hit.title) + '?redirect=true').then(function (res) { return res.json(); });
+      })
+      .then(function (page) {
+        if (!page || !page.extract) return null;
+        const match = page.extract.match(/^[^.!?]{10,240}[.!?]\s*[^.!?]{10,240}[.!?]/);
+        const text = match ? match[0] : page.extract.slice(0, 280);
+        return text.trim();
+      })
+      .catch(function () { return null; });
+
+    const timeout = new Promise(function (resolve) {
+      setTimeout(function () { resolve(null); }, 3500);
+    });
+
+    return Promise.race([request, timeout]);
+  }
+
+  function bankFor(topic) {
+    return BANKS[topic] || BANKS.generic;
+  }
+
+  function factParts(fact, parsed, mood, cfg, topic) {
+    const repeated = memory.fact === fact.id;
+    const parts = [];
+    const bank = bankFor(topic);
+
+    if (repeated) {
+      const angle = bank && bank.insight ? choose(bank.insight, 'insight:' + topic, fact.id + ':again') : '';
+      parts.push('Об этом я уже говорил, поэтому не буду повторяться.' + (angle ? ' Добавлю другое: ' + angle : ''));
+    } else {
+      parts.push(fact.text);
+      if (cfg.length !== 'short') {
+        parts.push('Источник: ' + String(fact.src).replace(/^\(|\)$/g, '') + '.');
+      }
+    }
+    memory.fact = fact.id;
+
+    if (!repeated && mood !== 'neutral' && cfg.length !== 'short' && bank && bank.reflect) {
+      parts.push(choose(bank.reflect, 'bridge:' + topic, fact.id));
+    }
+
+    const question = (cfg.length === 'short' ? '' : CLARIFY[parsed.kind]) ||
+      (bank && bank.questions ? choose(bank.questions, 'q:' + topic, fact.id + (repeated ? ':q' : '')) : '');
+    if (question) parts.push(question);
+    return parts;
+  }
+
+  function definitionParts(extract, parsed, cfg) {
+    if (extract) {
+      return [
+        'Коротко: ' + extract,
+        'Справка из энциклопедии, а не медицинское заключение. ' + CLARIFY[parsed.kind]
+      ];
+    }
+    return [
+      'Точного ответа у меня нет, и выдумывать его я не буду — так честнее. Что я действительно умею: разбирать тревогу, усталость, отношения и бытовые тупики, но без диагнозов и назначений.',
+      'Расскажите, что происходит именно у вас, — от этого и пойдём.'
+    ];
+  }
+
+  function talkParts(raw, topic, mood, cfg) {
+    const bank = bankFor(topic);
+    const parts = [];
+    const quote = quoteOf(raw);
+    const reflectSet = REFLECT[mood] || REFLECT.neutral;
+    parts.push(choose(reflectSet, 'reflect:' + topic + ':' + mood, quote).replace('{q}', quote));
+
+    if (cfg.length !== 'short' && bank && bank.insight) {
+      parts.push(choose(bank.insight, 'insight:' + topic, mood + topic));
+    }
+
+    if (bank && bank.tools && bank.tools.length) {
+      const wantsTool = mood === 'anxious' || mood === 'tired' || cfg.length === 'deep';
+      if (wantsTool) parts.push(formatTool(choose(bank.tools, 'tool:' + topic, mood + quote)));
+    }
+
+    if (bank && bank.questions) {
+      parts.push(choose(bank.questions, 'q:' + topic, quote));
+    }
+    return parts;
+  }
+
+  function finish(parts, base, cfg, ctx, options) {
+    const opts = options || {};
+    let body = parts.filter(function (part) { return !!part; }).join('\n\n');
+
+    if (cfg.length === 'short') {
+      const first = parts.filter(Boolean)[0] || '';
+      const question = parts.filter(Boolean).slice(-1)[0] || '';
+      body = question && question !== first ? first + '\n\n' + question : first;
+    }
+
+    if (cfg.tone === 'direct') {
+      body = body.replace(/^Слышу, /, '').replace(/^Похоже, /, '');
+    }
+
+    if (cfg.tone === 'warm' && opts.warm !== false && memory.turn % 3 === 0 && body.indexOf('Я рядом') === -1) {
+      body = 'Я рядом.\n\n' + body;
+    }
+
+    if (cfg.useName && ctx && ctx.name) {
+      const firstWord = body.split(/[\s,.:;!?]/)[0];
+      const head = /^[А-ЯЁA-Z]{2,}$/.test(firstWord)
+        ? body.charAt(0)
+        : body.charAt(0).toLowerCase();
+      body = ctx.name + ', ' + head + body.slice(1);
+    }
+
+    return { text: body, topic: base.topic, mood: base.mood };
+  }
+
   function reply(text, ctx) {
     const raw = String(text || '').trim();
     const settings = ctx || {};
@@ -3430,6 +3880,8 @@ const CONFIG = {
 
     if (/^(привет|здравствуй|добрый день|добрый вечер|доброе утро|хай|ку|приветствую)[!. ]*$/.test(lower) ||
         (words.length <= 3 && /^(привет|здравствуй|добрый|хай)/.test(lower))) {
+      memory.topic = '';
+      memory.turn = 0;
       return { text: greetingReply(name, direction), topic: 'greeting', mood: 'hopeful' };
     }
 
@@ -3477,55 +3929,50 @@ const CONFIG = {
       };
     }
 
-    const topic = detectTopic(lower);
+    let topic = detectTopic(lower);
     const mood = detectMood(lower);
-    const bank = BANKS[topic] || BANKS.generic;
-    const parts = [];
+    const parsed = parseQuestion(raw, lower);
+    const fact = parsed.isQuestion ? findFact(topic, lower, parsed.kind) : null;
+    if (fact) topic = fact.topic;
+    const base = { topic: topic, mood: mood };
 
-    if (isLatinOnly(raw)) {
-      parts.push('Отвечу по-русски — так мне легче быть точной.');
+    if (memory.topic !== topic) {
+      memory.topic = topic;
+      memory.fact = '';
+    }
+    memory.turn += 1;
+
+    if (isLatinOnly(raw) && parsed.isQuestion) {
+      return {
+        text: 'Отвечу по-русски — так мне легче быть точной.\n\n' + (CLARIFY[parsed.kind] || 'Сформулируйте, пожалуйста, вопрос ещё раз.'),
+        topic: 'meta',
+        mood: 'neutral'
+      };
     }
 
-    const reflect = pick(bank.reflect, 'reflect:' + topic, null);
-    parts.push(reflect);
-
-    const length = cfg.length || 'normal';
-    const roll = Math.random();
-
-    if (length !== 'short' && roll < 0.62) {
-      parts.push(pick(bank.insight, 'insight:' + topic, null));
+    if (fact) {
+      return finish(factParts(fact, parsed, mood, cfg, topic), base, cfg, settings, { warm: false });
     }
 
-    if (length === 'deep' || (length === 'normal' && roll > 0.45) || words.length > 18) {
-      const tool = pick(bank.tools, 'tool:' + topic, 'name');
-      if (tool) parts.push(formatTool(tool));
-    }
-
-    const focusList = DIRECTION_FOCUS[direction];
-    if (focusList && focusList.length && Math.random() < 0.28) {
-      parts.push(focusList[0]);
-    }
-
-    parts.push(pick(bank.questions, 'q:' + topic, null));
-
-    let body = parts.join('\n\n');
-
-    if (cfg.tone === 'direct') {
-      body = body.replace(/^Слышу, /, '').replace(/^Похоже, /, '');
-    }
-
-    if (cfg.tone === 'warm' && !/я рядом/i.test(body) && Math.random() < 0.3) {
-      body = 'Я рядом.\n\n' + body;
-    }
-
-    if (cfg.useName && name && Math.random() < 0.35) {
-      body = body.replace(/^([^\n]{1,60}?)([.!?])/, function (m, start, end) {
-        return name + ', ' + start.charAt(0).toLowerCase() + start.slice(1) + end;
+    if (parsed.isQuestion && parsed.term && parsed.term.length >= 3) {
+      return wikipediaExtract(parsed.term).then(function (extract) {
+        return finish(definitionParts(extract, parsed, cfg), base, cfg, settings, { warm: false });
       });
     }
 
-    return { text: body, topic: topic, mood: mood };
+    if (parsed.isQuestion && parsed.kind === 'advice') {
+      const bank = bankFor(topic);
+      const parts = [];
+      if (bank && bank.tools && bank.tools.length) {
+        parts.push(formatTool(choose(bank.tools, 'tool:' + topic, lower)));
+      }
+      parts.push(CLARIFY.advice);
+      return finish(parts, base, cfg, settings);
+    }
+
+    return finish(talkParts(raw, topic, mood, cfg), base, cfg, settings);
   }
+
 
   function greeting(directionId, name) {
     return greetingReply(name, directionId);
@@ -4133,9 +4580,16 @@ const CONFIG = {
 
     const delay = 650 + Math.min(raw.length * 9, 1100);
     setTimeout(function () {
-      const result = AI.reply(raw, contextForAI());
-      deliverBotReply(result, { voice: isVoice });
-      if (isVoice) setVoiceStatus('Можно говорить снова');
+      Promise.resolve(AI.reply(raw, contextForAI())).then(function (result) {
+        deliverBotReply(result, { voice: isVoice });
+        if (isVoice) setVoiceStatus('Можно говорить снова');
+      }).catch(function () {
+        deliverBotReply({
+          text: 'Что-то сбилось на моей стороне. Я по-прежнему здесь — расскажите ещё раз, что происходит?',
+          topic: 'generic',
+          mood: 'neutral'
+        }, { voice: isVoice });
+      });
     }, delay);
   }
 
